@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Tag de versión a publicar"
         required: false
-        default: "v1.0.2"
+        default: "v1.0.3"
 
 permissions:
   contents: write
@@ -222,17 +222,18 @@ jobs:
 
       - name: Build self-contained RPM package
         run: |
-          mkdir -p ~/rpmbuild/{SOURCES,SPECS,RPMS}
+          mkdir -p ~/rpmbuild/{SOURCES,SPECS,RPMS} dist-installer
           tar -xzf native-bundle/Cosmo-RakinIA-Linux-x64.tar.gz -C ~/rpmbuild/SOURCES/
           cp assets/cosmo_icon.svg assets/cosmo_icon.png ~/rpmbuild/SOURCES/
           cp packaging/linux/cosmo-rakinia.spec ~/rpmbuild/SPECS/
           rpmbuild -bb ~/rpmbuild/SPECS/cosmo-rakinia.spec
+          cp ~/rpmbuild/RPMS/x86_64/*.rpm dist-installer/Cosmo-RakinIA-Linux-Fedora-x86_64.rpm
 
       - name: Upload Fedora RPM
         uses: actions/upload-artifact@v4
         with:
           name: Cosmo-RakinIA-Fedora-RPM
-          path: /root/rpmbuild/RPMS/x86_64/*.rpm
+          path: dist-installer/Cosmo-RakinIA-Linux-Fedora-x86_64.rpm
 
 
   publish-release:
@@ -249,10 +250,8 @@ jobs:
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || 'v1.0.2' }}
-          name: "Cosmo IA Desktop ${{ inputs.release_tag || 'v1.0.2' }} (Zero-Friction Edition)"
+          tag_name: ${{ inputs.release_tag || 'v1.0.3' }}
+          name: "Cosmo IA Desktop ${{ inputs.release_tag || 'v1.0.3' }} (Auto-Update Edition)"
           body: |
-            Instaladores oficiales compilados con protección nativa para Windows 10/11, macOS (Apple Silicon & Intel) y Linux.
-            - Inicio de sesión con Google en 1 clic (prueba gratuita de 15 días).
-            - Descarga automática integrada de **Cosmo V7** y **Biblioteca Pericial Offline**.
+            Instaladores oficiales compilados con protección nativa y auto-actualización integrada para Windows 10/11, macOS (Apple Silicon & Intel) y Linux.
           files: release-assets/*
