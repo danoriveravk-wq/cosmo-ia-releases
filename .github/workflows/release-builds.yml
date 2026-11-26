@@ -1,0 +1,255 @@
+name: Build Cosmo RakinIA (Cython Native IP-Protected • Win 10/11 + macOS + Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag de versión a publicar"
+        required: false
+        default: "v1.0.2"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Windows 10 & 11 (x64 Native IP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: danoriveravk-wq/COSMO-IA-
+          ref: main
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (Cython + PyInstaller)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -r requirements.txt cython setuptools pyinstaller
+
+      - name: Run core unit tests
+        run: python -m unittest tests/test_cosmo_core.py -v
+
+      - name: Download llama.cpp Windows Vulkan+CPU binary (b12292)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          $url = "https://github.com/ggml-org/llama.cpp/releases/download/b12292/llama-b12292-bin-win-vulkan-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile llama-win.zip
+          Expand-Archive -Path llama-win.zip -DestinationPath llama-tmp -Force
+          Get-ChildItem -Path llama-tmp -Recurse -Include "llama-server.exe","*.dll" | Copy-Item -Destination bin -Force
+          Remove-Item -Recurse -Force llama-tmp, llama-win.zip
+
+      - name: Compile cosmo_app to native .pyd and strip raw KB
+        shell: pwsh
+        run: |
+          python scripts/build_native_cosmo.py
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue assets/biblioteca_pericial_v1.sqlite, assets/fichas_tecnicas
+
+      - name: Package with PyInstaller
+        run: pyinstaller --noconfirm packaging/windows/cosmo.spec
+
+      - name: Build Inno Setup installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: packaging/windows/installer.iss
+
+      - name: Optional Authenticode signing
+        if: env.WIN_CERT_PFX_B64 != ''
+        env:
+          WIN_CERT_PFX_B64: ${{ secrets.WIN_CERT_PFX_B64 }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WIN_CERT_PFX_B64))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1 -ExpandProperty FullName
+          & $signtool sign /f cert.pfx /p $env:WIN_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist-installer\Cosmo-RakinIA-Setup.exe
+          Remove-Item -Force cert.pfx
+
+      - name: Upload Windows 10/11 Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cosmo-RakinIA-Windows10-11-Setup
+          path: dist-installer/Cosmo-RakinIA-Setup.exe
+
+  build-macos:
+    name: macOS (${{ matrix.label }} Native IP)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+            label: AppleSilicon-arm64
+          - runner: macos-15-intel
+            arch: x64
+            label: Intel-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: danoriveravk-wq/COSMO-IA-
+          ref: main
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (Cython + PyInstaller)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -r requirements.txt cython setuptools pyinstaller
+
+      - name: Run core unit tests
+        run: python -m unittest tests/test_cosmo_core.py -v
+
+      - name: Generate macOS .icns icon
+        run: |
+          if [ -f assets/cosmo_icon.png ]; then
+            mkdir -p /tmp/cosmo.iconset
+            for sz in 16 32 128 256 512; do
+              sips -z $sz $sz assets/cosmo_icon.png --out /tmp/cosmo.iconset/icon_${sz}x${sz}.png >/dev/null
+              dbl=$((sz * 2))
+              sips -z $dbl $dbl assets/cosmo_icon.png --out /tmp/cosmo.iconset/icon_${sz}x${sz}@2x.png >/dev/null
+            done
+            iconutil -c icns /tmp/cosmo.iconset -o assets/cosmo_icon.icns
+          fi
+
+      - name: Download llama.cpp macOS binary (b12292)
+        run: |
+          mkdir -p bin llama-tmp
+          curl -fL "https://github.com/ggml-org/llama.cpp/releases/download/b12292/llama-b12292-bin-macos-${{ matrix.arch }}.tar.gz" -o llama-mac.tar.gz
+          tar -xzf llama-mac.tar.gz -C llama-tmp
+          find llama-tmp \( -name "llama-server" -o -name "*.dylib*" -o -name "*.metallib" \) -exec cp -P {} bin/ \;
+          chmod +x bin/llama-server
+          rm -rf llama-tmp llama-mac.tar.gz
+
+      - name: Compile cosmo_app to native .so and strip raw KB
+        run: |
+          python scripts/build_native_cosmo.py
+          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas
+
+      - name: Build .app bundle with PyInstaller
+        run: pyinstaller --noconfirm packaging/macos/cosmo.spec
+
+      - name: Ensure executable bit on bundled llama-server
+        run: find dist/CosmoRakinIA.app -name "llama-server" -exec chmod +x {} \;
+
+      - name: Package .dmg installer
+        run: |
+          mkdir -p dist-installer dmg-root
+          cp -R dist/CosmoRakinIA.app dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "Cosmo RakinIA" -srcfolder dmg-root -ov -format UDZO "dist-installer/Cosmo-RakinIA-macOS-${{ matrix.label }}.dmg"
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cosmo-RakinIA-macOS-${{ matrix.label }}
+          path: dist-installer/Cosmo-RakinIA-macOS-${{ matrix.label }}.dmg
+
+  build-linux-native:
+    name: Linux x64 (Native IP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: danoriveravk-wq/COSMO-IA-
+          ref: main
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system & Python dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+          python -m pip install --upgrade pip
+          pip install --prefer-binary -r requirements.txt cython setuptools pyinstaller
+
+      - name: Run core unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest tests/test_cosmo_core.py -v
+
+      - name: Compile cosmo_app to native .so and strip raw KB
+        run: |
+          python scripts/build_native_cosmo.py
+          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas
+
+      - name: Package with PyInstaller
+        run: |
+          pyinstaller --noconfirm packaging/linux/cosmo.spec
+          mkdir -p dist-installer
+          tar -C dist -czf dist-installer/Cosmo-RakinIA-Linux-x64.tar.gz CosmoRakinIA
+
+      - name: Upload Linux Native Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cosmo-RakinIA-Linux-x64
+          path: dist-installer/Cosmo-RakinIA-Linux-x64.tar.gz
+
+  build-linux-rpm:
+    name: Linux Fedora RPM (Native IP)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: danoriveravk-wq/COSMO-IA-
+          ref: main
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Install rpm-build and Cython toolchain
+        run: dnf install -y rpm-build gcc python3-devel python3-cython python3-setuptools
+
+      - name: Compile cosmo_app to native .so and strip raw KB
+        run: |
+          python3 scripts/build_native_cosmo.py
+          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas
+
+      - name: Build RPM package
+        run: |
+          mkdir -p ~/rpmbuild/{SOURCES,SPECS,RPMS}
+          cp -r cosmo_app assets run_cosmo.py ~/rpmbuild/SOURCES/
+          cp packaging/linux/cosmo-rakinia.spec ~/rpmbuild/SPECS/
+          rpmbuild -bb ~/rpmbuild/SPECS/cosmo-rakinia.spec
+
+      - name: Upload Fedora RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cosmo-RakinIA-Fedora-RPM
+          path: /root/rpmbuild/RPMS/x86_64/*.rpm
+
+
+  publish-release:
+    name: Publish Official GitHub Release
+    needs: [build-windows, build-macos, build-linux-native, build-linux-rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all compiled installers
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || 'v1.0.2' }}
+          name: "Cosmo IA Desktop ${{ inputs.release_tag || 'v1.0.2' }} (Zero-Friction Edition)"
+          body: |
+            Instaladores oficiales compilados con protección nativa para Windows 10/11, macOS (Apple Silicon & Intel) y Linux.
+            - Inicio de sesión con Google en 1 clic (prueba gratuita de 15 días).
+            - Descarga automática integrada de **Cosmo V7** y **Biblioteca Pericial Offline**.
+          files: release-assets/*
