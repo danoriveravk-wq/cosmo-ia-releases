@@ -200,6 +200,7 @@ jobs:
 
   build-linux-rpm:
     name: Linux Fedora RPM (Native IP)
+    needs: [build-linux-native]
     runs-on: ubuntu-latest
     container:
       image: fedora:41
@@ -210,18 +211,20 @@ jobs:
           ref: main
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Install rpm-build and Cython toolchain
-        run: dnf install -y rpm-build gcc python3-devel python3-cython python3-setuptools
+      - name: Download native Linux bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: Cosmo-RakinIA-Linux-x64
+          path: native-bundle
 
-      - name: Compile cosmo_app to native .so and strip raw KB
-        run: |
-          python3 scripts/build_native_cosmo.py
-          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas
+      - name: Install rpm-build
+        run: dnf install -y rpm-build tar gzip
 
-      - name: Build RPM package
+      - name: Build self-contained RPM package
         run: |
           mkdir -p ~/rpmbuild/{SOURCES,SPECS,RPMS}
-          cp -r cosmo_app assets run_cosmo.py ~/rpmbuild/SOURCES/
+          tar -xzf native-bundle/Cosmo-RakinIA-Linux-x64.tar.gz -C ~/rpmbuild/SOURCES/
+          cp assets/cosmo_icon.svg assets/cosmo_icon.png ~/rpmbuild/SOURCES/
           cp packaging/linux/cosmo-rakinia.spec ~/rpmbuild/SPECS/
           rpmbuild -bb ~/rpmbuild/SPECS/cosmo-rakinia.spec
 
