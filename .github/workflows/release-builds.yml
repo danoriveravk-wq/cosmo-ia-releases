@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Tag de versión a publicar"
         required: false
-        default: "v1.0.3"
+        default: "v1.0.4"
 
 permissions:
   contents: write
@@ -49,10 +49,13 @@ jobs:
         shell: pwsh
         run: |
           python scripts/build_native_cosmo.py
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue assets/biblioteca_pericial_v1.sqlite, assets/fichas_tecnicas
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue assets/biblioteca_pericial_v1.sqlite, assets/fichas_tecnicas, assets/kb_coverage_report.json
 
       - name: Package with PyInstaller
         run: pyinstaller --noconfirm packaging/windows/cosmo.spec
+
+      - name: Smoke test frozen Windows binary
+        run: .\dist\CosmoRakinIA\CosmoRakinIA.exe --self-test
 
       - name: Build Inno Setup installer
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
@@ -60,12 +63,15 @@ jobs:
           path: packaging/windows/installer.iss
 
       - name: Optional Authenticode signing
-        if: env.WIN_CERT_PFX_B64 != ''
         env:
           WIN_CERT_PFX_B64: ${{ secrets.WIN_CERT_PFX_B64 }}
           WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CERT_PFX_B64)) {
+            Write-Host "Sin certificado Authenticode; omitiendo firma."
+            exit 0
+          }
           [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WIN_CERT_PFX_B64))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1 -ExpandProperty FullName
           & $signtool sign /f cert.pfx /p $env:WIN_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist-installer\Cosmo-RakinIA-Setup.exe
@@ -134,13 +140,17 @@ jobs:
       - name: Compile cosmo_app to native .so and strip raw KB
         run: |
           python scripts/build_native_cosmo.py
-          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas
+          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas assets/kb_coverage_report.json
 
       - name: Build .app bundle with PyInstaller
         run: pyinstaller --noconfirm packaging/macos/cosmo.spec
 
-      - name: Ensure executable bit on bundled llama-server
-        run: find dist/CosmoRakinIA.app -name "llama-server" -exec chmod +x {} \;
+      - name: Ensure executable bit and re-sign macOS app bundle
+        run: |
+          find dist/CosmoRakinIA.app -name "llama-server" -exec chmod +x {} \;
+          codesign --force --deep --sign - dist/CosmoRakinIA.app
+          codesign --verify --deep --strict dist/CosmoRakinIA.app
+          dist/CosmoRakinIA.app/Contents/MacOS/CosmoRakinIA --self-test
 
       - name: Package .dmg installer
         run: |
@@ -181,14 +191,24 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m unittest tests/test_cosmo_core.py -v
 
+      - name: Download llama.cpp Linux Vulkan+CPU binary (b12292)
+        run: |
+          mkdir -p bin llama-tmp
+          curl -fL "https://github.com/ggml-org/llama.cpp/releases/download/b12292/llama-b12292-bin-ubuntu-vulkan-x64.tar.gz" -o llama-linux.tar.gz
+          tar -xzf llama-linux.tar.gz -C llama-tmp
+          find llama-tmp \( -name "llama-server" -o -name "*.so*" \) -exec cp -P {} bin/ \;
+          chmod +x bin/llama-server
+          rm -rf llama-tmp llama-linux.tar.gz
+
       - name: Compile cosmo_app to native .so and strip raw KB
         run: |
           python scripts/build_native_cosmo.py
-          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas
+          rm -rf assets/biblioteca_pericial_v1.sqlite assets/fichas_tecnicas assets/kb_coverage_report.json
 
       - name: Package with PyInstaller
         run: |
           pyinstaller --noconfirm packaging/linux/cosmo.spec
+          QT_QPA_PLATFORM=offscreen ./dist/CosmoRakinIA/CosmoRakinIA --self-test
           mkdir -p dist-installer
           tar -C dist -czf dist-installer/Cosmo-RakinIA-Linux-x64.tar.gz CosmoRakinIA
 
@@ -234,7 +254,6 @@ jobs:
         with:
           name: Cosmo-RakinIA-Fedora-RPM
           path: dist-installer/Cosmo-RakinIA-Linux-Fedora-x86_64.rpm
-
 
   publish-release:
     name: Publish Official GitHub Release
